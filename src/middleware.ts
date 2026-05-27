@@ -4,14 +4,20 @@ import type { NextRequest } from 'next/server'
 const COMPANY_PUBLIC = [
   '/company/login',
   '/company/register',
+  '/company/forgot-password',
+  '/company/reset-password',
   '/api/company/auth/',
 ]
 
 const DRIVER_PUBLIC = [
   '/login',
   '/register',
+  '/forgot-password',
+  '/reset-password',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
 ]
 
 export function middleware(request: NextRequest) {

@@ -80,10 +80,13 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
 
-          <p className="text-center text-sm text-gray-500">
-            Don&apos;t have an account?{' '}
-            <Link href="/register" className="text-brand-600 hover:underline font-medium">Create one</Link>
-          </p>
+          <div className="flex items-center justify-between text-sm">
+            <p className="text-gray-500">
+              Don&apos;t have an account?{' '}
+              <Link href="/register" className="text-brand-600 hover:underline font-medium">Create one</Link>
+            </p>
+            <Link href="/forgot-password" className="text-gray-400 hover:text-brand-600 transition-colors">Forgot password?</Link>
+          </div>
         </form>
       </div>
     </div>

@@ -71,10 +71,13 @@ export default function CompanyLoginPage() {
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
 
-          <p className="text-center text-sm text-gray-500">
-            Don&apos;t have a company account?{' '}
-            <Link href="/company/register" className="text-brand-600 hover:underline font-medium">Register your company</Link>
-          </p>
+          <div className="flex items-center justify-between text-sm">
+            <p className="text-gray-500">
+              Don&apos;t have an account?{' '}
+              <Link href="/company/register" className="text-brand-600 hover:underline font-medium">Register</Link>
+            </p>
+            <Link href="/company/forgot-password" className="text-gray-400 hover:text-brand-600 transition-colors">Forgot password?</Link>
+          </div>
         </form>
 
         <p className="text-center text-sm text-gray-400 mt-4">
