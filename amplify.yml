@@ -8,6 +8,7 @@ frontend:
         - npx prisma generate
     build:
       commands:
+        - env | grep -E "^(DATABASE_URL|JWT_SECRET|APP_AWS_)" >> .env.production
         - npm run build
   artifacts:
     baseDirectory: .next
