@@ -37,3 +37,26 @@ export async function getSessionDriver(): Promise<JwtPayload | null> {
     return null
   }
 }
+
+export interface CompanyJwtPayload {
+  companyUserId: string
+  companyId: string
+  email: string
+  role: string
+}
+
+export function signCompanyToken(payload: CompanyJwtPayload): string {
+  const options: SignOptions = { expiresIn: JWT_EXPIRES_IN as SignOptions['expiresIn'] }
+  return jwt.sign(payload, JWT_SECRET, options)
+}
+
+export async function getSessionCompanyUser(): Promise<CompanyJwtPayload | null> {
+  try {
+    const cookieStore = cookies()
+    const token = cookieStore.get('company_token')?.value
+    if (!token) return null
+    return jwt.verify(token, JWT_SECRET) as CompanyJwtPayload
+  } catch {
+    return null
+  }
+}

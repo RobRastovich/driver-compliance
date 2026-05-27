@@ -30,8 +30,58 @@ model Driver {
   documents          Document[]
   verifications      Verification?
   readingRecordings  ReadingRecording[]
+  rosterEntries      DriverRoster[]
 
   @@map("drivers")
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  ein       String?
+  phone     String
+  address   String
+  city      String
+  state     String
+  zip       String
+  website   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users  CompanyUser[]
+  roster DriverRoster[]
+
+  @@map("companies")
+}
+
+model CompanyUser {
+  id           String          @id @default(cuid())
+  companyId    String
+  email        String          @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  phone        String?
+  role         CompanyUserRole @default(ADMIN)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("company_users")
+}
+
+model DriverRoster {
+  id        String   @id @default(cuid())
+  companyId String
+  driverId  String
+  addedAt   DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  driver  Driver  @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, driverId])
+  @@map("driver_roster")
 }
 
 model ReadingRecording {
@@ -122,6 +172,11 @@ model TestSentence {
   createdAt  DateTime @default(now())
 
   @@map("test_sentences")
+}
+
+enum CompanyUserRole {
+  ADMIN
+  USER
 }
 
 enum DocumentType {

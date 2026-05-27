@@ -1,22 +1,35 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register']
+const COMPANY_PUBLIC = [
+  '/company/login',
+  '/company/register',
+  '/api/company/auth/',
+]
 
-// Middleware runs in the Edge Runtime — only check cookie presence.
-// Full JWT verification happens in getSessionDriver() (Node.js runtime).
+const DRIVER_PUBLIC = [
+  '/login',
+  '/register',
+  '/api/auth/login',
+  '/api/auth/register',
+]
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
+  if (pathname === '/') return NextResponse.next()
+
+  if (COMPANY_PUBLIC.some((p) => pathname.startsWith(p))) return NextResponse.next()
+  if (DRIVER_PUBLIC.some((p) => pathname.startsWith(p))) return NextResponse.next()
+
+  if (pathname.startsWith('/company/') || pathname.startsWith('/api/company/')) {
+    const token = request.cookies.get('company_token')?.value
+    if (!token) return NextResponse.redirect(new URL('/company/login', request.url))
     return NextResponse.next()
   }
 
   const token = request.cookies.get('auth_token')?.value
-  if (!token) {
-    return NextResponse.redirect(new URL('/login', request.url))
-  }
-
+  if (!token) return NextResponse.redirect(new URL('/login', request.url))
   return NextResponse.next()
 }
 
