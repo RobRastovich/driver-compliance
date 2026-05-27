@@ -34,6 +34,7 @@ export default function CompanyNavBar({ companyName, userName }: { companyName: 
           {navLink('/company/dashboard', 'Dashboard')}
           {navLink('/company/search', 'Search Drivers')}
           {navLink('/company/roster', 'My Roster')}
+          {navLink('/company/users', 'Users')}
         </div>
       </div>
       <div className="flex items-center gap-4">
