@@ -9,6 +9,7 @@ interface Sentence {
 }
 
 type TestStatus = 'loading' | 'ready' | 'recording' | 'reviewing' | 'scored' | 'submitting' | 'passed' | 'failed'
+type FaceStatus = 'idle' | 'checking' | 'passed' | 'failed' | 'no-face' | 'no-photo' | 'skipped'
 
 // Web Speech API types
 interface SpeechRecognitionEvent extends Event {
@@ -80,6 +81,7 @@ export default function ReadingTestPage() {
   const [currentTranscript, setCurrentTranscript] = useState('')
   const [interimTranscript, setInterimTranscript] = useState('')
   const [currentScore, setCurrentScore] = useState<number | null>(null)
+  const [faceStatus, setFaceStatus] = useState<FaceStatus>('idle')
   const [status, setStatus] = useState<TestStatus>('loading')
   const [error, setError] = useState('')
   const [result, setResult] = useState<{ passed: boolean; score: number } | null>(null)
@@ -96,10 +98,26 @@ export default function ReadingTestPage() {
   const audioBlobsRef = useRef<(Blob | null)[]>([])
   const recordingStartRef = useRef<number>(0)
 
-  // Release mic when leaving the page
+  // Webcam refs for identity verification
+  const webcamVideoRef = useRef<HTMLVideoElement>(null)
+  const webcamCanvasRef = useRef<HTMLCanvasElement>(null)
+  const webcamStreamRef = useRef<MediaStream | null>(null)
+
+  // Release all streams when leaving the page
   useEffect(() => {
-    return () => { micStreamRef.current?.getTracks().forEach((t) => t.stop()) }
+    return () => {
+      micStreamRef.current?.getTracks().forEach((t) => t.stop())
+      webcamStreamRef.current?.getTracks().forEach((t) => t.stop())
+    }
   }, [])
+
+  // Wire up webcam video element once the DOM node mounts during recording
+  useEffect(() => {
+    if (status === 'recording' && webcamVideoRef.current && webcamStreamRef.current) {
+      webcamVideoRef.current.srcObject = webcamStreamRef.current
+      webcamVideoRef.current.play().catch(() => {})
+    }
+  }, [status])
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition
@@ -173,12 +191,37 @@ export default function ReadingTestPage() {
     recognitionRef.current = recognition
   }, [])
 
+  const verifyFaceCapture = useCallback(async (canvas: HTMLCanvasElement) => {
+    return new Promise<void>((resolve) => {
+      canvas.toBlob(async (blob) => {
+        if (!blob) { setFaceStatus('skipped'); resolve(); return }
+        const form = new FormData()
+        form.append('image', new File([blob], 'face-capture.jpg', { type: 'image/jpeg' }))
+        try {
+          const res = await fetch('/api/verify/face/reading', { method: 'POST', body: form })
+          const data = await res.json()
+          if (!res.ok) {
+            setFaceStatus(data.reason === 'no-profile-photo' ? 'no-photo' : 'skipped')
+          } else if (data.noFace) {
+            setFaceStatus('no-face')
+          } else {
+            setFaceStatus(data.passed ? 'passed' : 'failed')
+          }
+        } catch {
+          setFaceStatus('skipped')
+        }
+        resolve()
+      }, 'image/jpeg', 0.88)
+    })
+  }, [])
+
   const startRecording = useCallback(async () => {
     accumulatedRef.current = ''
     recordingActiveRef.current = true
     setCurrentTranscript('')
     setInterimTranscript('')
     setCurrentScore(null)
+    setFaceStatus('idle')
 
     // Acquire mic stream once; reuse across sentences
     if (!micStreamRef.current) {
@@ -188,6 +231,18 @@ export default function ReadingTestPage() {
         setError('Microphone access denied. Please allow microphone access and try again.')
         recordingActiveRef.current = false
         return
+      }
+    }
+
+    // Start webcam for identity capture (independent of mic stream)
+    if (!webcamStreamRef.current) {
+      try {
+        webcamStreamRef.current = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        })
+      } catch {
+        // Webcam unavailable — proceed without face verification
+        webcamStreamRef.current = null
       }
     }
 
@@ -203,14 +258,6 @@ export default function ReadingTestPage() {
     startSession()
   }, [startSession])
 
-  const stopRecording = useCallback(() => {
-    recordingActiveRef.current = false
-    recognitionRef.current?.stop()
-    recognitionRef.current = null
-    setStatus('reviewing')
-  }, [])
-
-  // Score immediately when the user stops recording
   const scoreAndReview = useCallback((sentenceIdx: number, transcript: string) => {
     const score = scoreSentence(sentences[sentenceIdx]?.text ?? '', transcript)
     setCurrentScore(score)
@@ -237,7 +284,26 @@ export default function ReadingTestPage() {
       recorder.stop()
     }
     mediaRecorderRef.current = null
-  }, [currentIdx, scoreAndReview])
+
+    // Capture webcam frame and run face verification in background
+    const video = webcamVideoRef.current
+    const canvas = webcamCanvasRef.current
+    if (video && canvas && webcamStreamRef.current) {
+      canvas.width = video.videoWidth || 640
+      canvas.height = video.videoHeight || 480
+      canvas.getContext('2d')?.drawImage(video, 0, 0)
+      webcamStreamRef.current.getTracks().forEach((t) => t.stop())
+      webcamStreamRef.current = null
+      setFaceStatus('checking')
+      verifyFaceCapture(canvas)
+    } else {
+      if (webcamStreamRef.current) {
+        webcamStreamRef.current.getTracks().forEach((t) => t.stop())
+        webcamStreamRef.current = null
+      }
+      setFaceStatus('skipped')
+    }
+  }, [currentIdx, scoreAndReview, verifyFaceCapture])
 
   const confirmSentence = useCallback(() => {
     const transcript = currentTranscript.trim()
@@ -253,6 +319,7 @@ export default function ReadingTestPage() {
 
     setCurrentTranscript('')
     setCurrentScore(null)
+    setFaceStatus('idle')
     accumulatedRef.current = ''
 
     if (currentIdx < sentences.length - 1) {
@@ -280,7 +347,6 @@ export default function ReadingTestPage() {
         await fetch('/api/recordings', { method: 'POST', body: form })
       })
     )
-    // Release mic
     micStreamRef.current?.getTracks().forEach((t) => t.stop())
     micStreamRef.current = null
   }
@@ -302,7 +368,6 @@ export default function ReadingTestPage() {
         setStatus('failed')
         return
       }
-      // Upload recordings in the background — don't block on result
       uploadRecordings().catch(console.error)
       setResult({ passed: data.passed, score: data.score })
       setStatus(data.passed ? 'passed' : 'failed')
@@ -320,6 +385,26 @@ export default function ReadingTestPage() {
   const progress = sentences.length > 0
     ? ((currentIdx + (status === 'passed' || status === 'failed' ? 1 : 0)) / sentences.length) * 100
     : 0
+
+  const faceBadge = () => {
+    if (faceStatus === 'idle') return null
+    const configs: Record<FaceStatus, { label: string; cls: string } | null> = {
+      idle: null,
+      checking: { label: '🔄 Verifying identity…', cls: 'bg-blue-50 text-blue-600 border-blue-200' },
+      passed: { label: '✓ Identity verified', cls: 'bg-green-50 text-green-700 border-green-200' },
+      failed: { label: '✗ Identity mismatch', cls: 'bg-red-50 text-red-700 border-red-200' },
+      'no-face': { label: '⚠ No face detected — ensure camera is visible', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+      'no-photo': { label: '⚠ Add a profile photo to enable identity verification', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+      skipped: { label: 'Identity check unavailable', cls: 'bg-gray-50 text-gray-500 border-gray-200' },
+    }
+    const cfg = configs[faceStatus]
+    if (!cfg) return null
+    return (
+      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium ${cfg.cls}`}>
+        {cfg.label}
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -385,40 +470,62 @@ export default function ReadingTestPage() {
               </div>
             )}
 
-            {/* Immediate score result */}
+            {/* Immediate score + face verification result */}
             {status === 'scored' && currentScore !== null && (
-              <div className={`rounded-xl px-5 py-4 mb-5 flex items-center gap-4
-                ${currentScore >= PASSING_SCORE ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}
-              >
-                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold flex-shrink-0
-                  ${currentScore >= PASSING_SCORE ? 'bg-green-500 text-white' : 'bg-red-400 text-white'}`}
+              <div className="mb-5 space-y-2">
+                <div className={`rounded-xl px-5 py-4 flex items-center gap-4
+                  ${currentScore >= PASSING_SCORE ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}
                 >
-                  {Math.round(currentScore * 100)}
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold flex-shrink-0
+                    ${currentScore >= PASSING_SCORE ? 'bg-green-500 text-white' : 'bg-red-400 text-white'}`}
+                  >
+                    {Math.round(currentScore * 100)}
+                  </div>
+                  <div>
+                    <p className={`font-semibold ${currentScore >= PASSING_SCORE ? 'text-green-800' : 'text-red-700'}`}>
+                      {currentScore >= PASSING_SCORE ? 'Good job!' : 'Low score — consider re-recording'}
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {Math.round(currentScore * 100)}% match · {currentIdx < sentences.length - 1 ? 'Continue to next sentence or re-record.' : 'Submit when ready.'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className={`font-semibold ${currentScore >= PASSING_SCORE ? 'text-green-800' : 'text-red-700'}`}>
-                    {currentScore >= PASSING_SCORE ? 'Good job!' : 'Low score — consider re-recording'}
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    {Math.round(currentScore * 100)}% match · {currentIdx < sentences.length - 1 ? 'Continue to next sentence or re-record.' : 'Submit when ready.'}
-                  </p>
-                </div>
+                {faceBadge()}
               </div>
             )}
 
-            {/* Recording indicator */}
+            {/* Recording area with webcam preview */}
             {status === 'recording' && (
-              <div className="flex items-center gap-2 mb-5">
-                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
-                <span className="text-sm text-red-600 font-medium">Recording — speak clearly</span>
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+                  <span className="text-sm text-red-600 font-medium">Recording — speak clearly</span>
+                </div>
+                {/* Webcam preview */}
+                <div className="relative w-24 h-18 rounded-lg overflow-hidden bg-gray-900 border border-gray-300 flex-shrink-0">
+                  <video
+                    ref={webcamVideoRef}
+                    className="w-24 h-18 object-cover scale-x-[-1]"
+                    autoPlay
+                    playsInline
+                    muted
+                  />
+                  <div className="absolute bottom-1 left-1 flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                  </div>
+                </div>
               </div>
             )}
 
             {status === 'ready' && (
               <div className="text-sm text-gray-500 mb-5 space-y-1">
                 <p>Click <strong>Start Recording</strong>, read the sentence aloud, then click <strong>Stop</strong>.</p>
+                <p className="text-xs text-gray-400">Your camera will be used for identity verification while you read.</p>
               </div>
             )}
+
+            {/* Hidden canvas for webcam capture */}
+            <canvas ref={webcamCanvasRef} className="hidden" />
 
             {/* Buttons */}
             <div className="flex flex-col sm:flex-row gap-3">
@@ -435,17 +542,17 @@ export default function ReadingTestPage() {
               {(status === 'reviewing' || status === 'scored') && (
                 <>
                   <button
-                    onClick={() => { setCurrentTranscript(''); setCurrentScore(null); accumulatedRef.current = ''; setStatus('ready') }}
+                    onClick={() => { setCurrentTranscript(''); setCurrentScore(null); setFaceStatus('idle'); accumulatedRef.current = ''; setStatus('ready') }}
                     className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-lg py-2.5 text-sm transition-colors"
                   >
                     Re-record
                   </button>
                   <button
                     onClick={confirmSentence}
-                    disabled={!currentTranscript.trim()}
+                    disabled={!currentTranscript.trim() || faceStatus === 'checking'}
                     className="flex-1 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-semibold rounded-lg py-2.5 text-sm transition-colors"
                   >
-                    {currentIdx < sentences.length - 1 ? 'Next Sentence' : 'Submit Test'}
+                    {faceStatus === 'checking' ? 'Verifying…' : currentIdx < sentences.length - 1 ? 'Next Sentence' : 'Submit Test'}
                   </button>
                 </>
               )}
@@ -484,6 +591,7 @@ export default function ReadingTestPage() {
                 setTranscriptions(new Array(sentences.length).fill(''))
                 setSentenceScores(new Array(sentences.length).fill(-1))
                 setCurrentScore(null)
+                setFaceStatus('idle')
                 setResult(null)
                 setStatus('ready')
               }}
