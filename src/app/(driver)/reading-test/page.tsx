@@ -83,6 +83,7 @@ export default function ReadingTestPage() {
   const [faceStatus, setFaceStatus] = useState<FaceStatus>('idle')
   const [status, setStatus] = useState<TestStatus>('loading')
   const [error, setError] = useState('')
+  const [micBlocked, setMicBlocked] = useState<'denied' | 'not-found' | null>(null)
   const [result, setResult] = useState<{ passed: boolean; score: number } | null>(null)
   const [speechSupported, setSpeechSupported] = useState(true)
 
@@ -233,6 +234,12 @@ export default function ReadingTestPage() {
     recognition.onerror = (e: Event) => {
       const err = (e as Event & { error?: string }).error
       if (err === 'no-speech' && recordingActiveRef.current) { startSession(); return }
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        setMicBlocked('denied')
+        recordingActiveRef.current = false
+        setStatus('ready')
+        return
+      }
       setError('Microphone error. Please check your microphone and try again.')
       setStatus('ready')
     }
@@ -253,12 +260,14 @@ export default function ReadingTestPage() {
     setInterimTranscript('')
     setCurrentScore(null)
     setFaceStatus('idle')
+    setMicBlocked(null)
 
     if (!micStreamRef.current) {
       try {
         micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true })
-      } catch {
-        setError('Microphone access denied. Please allow microphone access and try again.')
+      } catch (err) {
+        const name = (err as { name?: string }).name
+        setMicBlocked(name === 'NotFoundError' ? 'not-found' : 'denied')
         recordingActiveRef.current = false
         return
       }
@@ -429,6 +438,67 @@ export default function ReadingTestPage() {
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         {status === 'loading' && (
           <div className="text-center py-12 text-gray-400">Loading test...</div>
+        )}
+
+        {micBlocked && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 mb-5">
+            <p className="font-semibold text-amber-900 mb-1">
+              {micBlocked === 'not-found' ? '🎤 No microphone found' : '🎤 Microphone access blocked'}
+            </p>
+            <p className="text-sm text-amber-800 mb-4">
+              {micBlocked === 'not-found'
+                ? 'No microphone was detected on this device. Please connect a microphone and try again.'
+                : 'This page needs microphone access to record your reading. Follow the steps below to allow it.'}
+            </p>
+
+            {micBlocked === 'denied' && (
+              <div className="space-y-4 text-sm text-amber-900">
+                <div>
+                  <p className="font-semibold mb-1">Chrome or Edge</p>
+                  <ol className="list-decimal list-inside space-y-1 text-amber-800">
+                    <li>Click the <strong>lock 🔒</strong> or <strong>camera 📷</strong> icon in the address bar (left of the URL)</li>
+                    <li>Find <strong>Microphone</strong> and change it to <strong>Allow</strong></li>
+                    <li>Reload this page</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <p className="font-semibold mb-1">Safari</p>
+                  <ol className="list-decimal list-inside space-y-1 text-amber-800">
+                    <li>In the menu bar, go to <strong>Safari → Settings for This Website</strong></li>
+                    <li>Set <strong>Microphone</strong> to <strong>Allow</strong></li>
+                    <li>Reload this page</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <p className="font-semibold mb-1">macOS system permission (if still blocked)</p>
+                  <ol className="list-decimal list-inside space-y-1 text-amber-800">
+                    <li>Open <strong>System Settings → Privacy & Security → Microphone</strong></li>
+                    <li>Make sure your browser (Chrome, Safari, or Edge) is toggled <strong>on</strong></li>
+                    <li>Restart your browser and reload this page</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <p className="font-semibold mb-1">Windows system permission (if still blocked)</p>
+                  <ol className="list-decimal list-inside space-y-1 text-amber-800">
+                    <li>Open <strong>Settings → Privacy & Security → Microphone</strong></li>
+                    <li>Make sure <strong>&quot;Let apps access your microphone&quot;</strong> is on</li>
+                    <li>Scroll down and enable your browser</li>
+                    <li>Reload this page</li>
+                  </ol>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={() => setMicBlocked(null)}
+              className="mt-4 text-xs font-medium text-amber-700 hover:text-amber-900 underline"
+            >
+              I&apos;ve updated the settings — try again
+            </button>
+          </div>
         )}
 
         {error && (
