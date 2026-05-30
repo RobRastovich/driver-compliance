@@ -45,7 +45,6 @@ declare global {
   }
 }
 
-// Mirrors the server-side scorer in src/lib/reading.ts
 const NUMBER_WORDS: Record<string, string> = {
   zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5',
   six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11',
@@ -98,26 +97,10 @@ export default function ReadingTestPage() {
   const audioBlobsRef = useRef<(Blob | null)[]>([])
   const recordingStartRef = useRef<number>(0)
 
-  // Webcam refs for identity verification
-  const webcamVideoRef = useRef<HTMLVideoElement>(null)
-  const webcamCanvasRef = useRef<HTMLCanvasElement>(null)
-  const webcamStreamRef = useRef<MediaStream | null>(null)
-
-  // Release all streams when leaving the page
+  // Release mic on unmount
   useEffect(() => {
-    return () => {
-      micStreamRef.current?.getTracks().forEach((t) => t.stop())
-      webcamStreamRef.current?.getTracks().forEach((t) => t.stop())
-    }
+    return () => { micStreamRef.current?.getTracks().forEach((t) => t.stop()) }
   }, [])
-
-  // Wire up webcam video element once the DOM node mounts during recording
-  useEffect(() => {
-    if (status === 'recording' && webcamVideoRef.current && webcamStreamRef.current) {
-      webcamVideoRef.current.srcObject = webcamStreamRef.current
-      webcamVideoRef.current.play().catch(() => {})
-    }
-  }, [status])
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition
@@ -151,6 +134,78 @@ export default function ReadingTestPage() {
     }
     loadSentences()
   }, [])
+
+  // After each recording stops, trigger a quick camera capture for identity verification.
+  // This runs AFTER recording so it never interferes with the microphone.
+  useEffect(() => {
+    if (status !== 'scored') return
+
+    let cancelled = false
+
+    async function runFaceCapture() {
+      setFaceStatus('checking')
+      let stream: MediaStream | null = null
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: 'user' },
+        })
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return }
+
+        // Mount an off-screen video element to draw a frame
+        const video = document.createElement('video')
+        video.srcObject = stream
+        video.muted = true
+
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timeout')), 5000)
+          video.onloadedmetadata = () => { clearTimeout(timeout); resolve() }
+        })
+        await video.play()
+
+        // Brief pause so the camera has a stable frame
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return }
+
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth || 320
+        canvas.height = video.videoHeight || 240
+        canvas.getContext('2d')?.drawImage(video, 0, 0)
+
+        // Camera off as soon as we have the frame
+        stream.getTracks().forEach((t) => t.stop())
+        stream = null
+
+        // Send to API
+        await new Promise<void>((resolve) => {
+          canvas.toBlob(async (blob) => {
+            if (!blob || cancelled) { setFaceStatus('skipped'); resolve(); return }
+            const form = new FormData()
+            form.append('image', new File([blob], 'face-capture.jpg', { type: 'image/jpeg' }))
+            try {
+              const res = await fetch('/api/verify/face/reading', { method: 'POST', body: form })
+              const data = await res.json()
+              if (!cancelled) {
+                if (!res.ok) {
+                  setFaceStatus(data.reason === 'no-profile-photo' ? 'no-photo' : 'skipped')
+                } else {
+                  setFaceStatus(data.noFace ? 'no-face' : data.passed ? 'passed' : 'failed')
+                }
+              }
+            } catch {
+              if (!cancelled) setFaceStatus('skipped')
+            }
+            resolve()
+          }, 'image/jpeg', 0.88)
+        })
+      } catch {
+        stream?.getTracks().forEach((t) => t.stop())
+        if (!cancelled) setFaceStatus('skipped')
+      }
+    }
+
+    runFaceCapture()
+    return () => { cancelled = true }
+  }, [status])
 
   const startSession = useCallback(() => {
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition
@@ -191,30 +246,6 @@ export default function ReadingTestPage() {
     recognitionRef.current = recognition
   }, [])
 
-  const verifyFaceCapture = useCallback(async (canvas: HTMLCanvasElement) => {
-    return new Promise<void>((resolve) => {
-      canvas.toBlob(async (blob) => {
-        if (!blob) { setFaceStatus('skipped'); resolve(); return }
-        const form = new FormData()
-        form.append('image', new File([blob], 'face-capture.jpg', { type: 'image/jpeg' }))
-        try {
-          const res = await fetch('/api/verify/face/reading', { method: 'POST', body: form })
-          const data = await res.json()
-          if (!res.ok) {
-            setFaceStatus(data.reason === 'no-profile-photo' ? 'no-photo' : 'skipped')
-          } else if (data.noFace) {
-            setFaceStatus('no-face')
-          } else {
-            setFaceStatus(data.passed ? 'passed' : 'failed')
-          }
-        } catch {
-          setFaceStatus('skipped')
-        }
-        resolve()
-      }, 'image/jpeg', 0.88)
-    })
-  }, [])
-
   const startRecording = useCallback(async () => {
     accumulatedRef.current = ''
     recordingActiveRef.current = true
@@ -223,7 +254,6 @@ export default function ReadingTestPage() {
     setCurrentScore(null)
     setFaceStatus('idle')
 
-    // Acquire mic stream once; reuse across sentences
     if (!micStreamRef.current) {
       try {
         micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -234,19 +264,6 @@ export default function ReadingTestPage() {
       }
     }
 
-    // Start webcam for identity capture (independent of mic stream)
-    if (!webcamStreamRef.current) {
-      try {
-        webcamStreamRef.current = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-        })
-      } catch {
-        // Webcam unavailable — proceed without face verification
-        webcamStreamRef.current = null
-      }
-    }
-
-    // Start MediaRecorder for this sentence
     audioChunksRef.current = []
     const recorder = new MediaRecorder(micStreamRef.current)
     recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data) }
@@ -261,7 +278,7 @@ export default function ReadingTestPage() {
   const scoreAndReview = useCallback((sentenceIdx: number, transcript: string) => {
     const score = scoreSentence(sentences[sentenceIdx]?.text ?? '', transcript)
     setCurrentScore(score)
-    setStatus('scored')
+    setStatus('scored') // triggers the face capture useEffect
   }, [sentences])
 
   const handleStopRecording = useCallback(() => {
@@ -272,7 +289,6 @@ export default function ReadingTestPage() {
     setCurrentTranscript(transcript)
     scoreAndReview(currentIdx, transcript)
 
-    // Capture audio blob for this sentence
     const recorder = mediaRecorderRef.current
     if (recorder && recorder.state !== 'inactive') {
       const durationSecs = (Date.now() - recordingStartRef.current) / 1000
@@ -284,26 +300,7 @@ export default function ReadingTestPage() {
       recorder.stop()
     }
     mediaRecorderRef.current = null
-
-    // Capture webcam frame and run face verification in background
-    const video = webcamVideoRef.current
-    const canvas = webcamCanvasRef.current
-    if (video && canvas && webcamStreamRef.current) {
-      canvas.width = video.videoWidth || 640
-      canvas.height = video.videoHeight || 480
-      canvas.getContext('2d')?.drawImage(video, 0, 0)
-      webcamStreamRef.current.getTracks().forEach((t) => t.stop())
-      webcamStreamRef.current = null
-      setFaceStatus('checking')
-      verifyFaceCapture(canvas)
-    } else {
-      if (webcamStreamRef.current) {
-        webcamStreamRef.current.getTracks().forEach((t) => t.stop())
-        webcamStreamRef.current = null
-      }
-      setFaceStatus('skipped')
-    }
-  }, [currentIdx, scoreAndReview, verifyFaceCapture])
+  }, [currentIdx, scoreAndReview])
 
   const confirmSentence = useCallback(() => {
     const transcript = currentTranscript.trim()
@@ -387,23 +384,17 @@ export default function ReadingTestPage() {
     : 0
 
   const faceBadge = () => {
-    if (faceStatus === 'idle') return null
-    const configs: Record<FaceStatus, { label: string; cls: string } | null> = {
-      idle: null,
+    const configs: Partial<Record<FaceStatus, { label: string; cls: string }>> = {
       checking: { label: '🔄 Verifying identity…', cls: 'bg-blue-50 text-blue-600 border-blue-200' },
-      passed: { label: '✓ Identity verified', cls: 'bg-green-50 text-green-700 border-green-200' },
-      failed: { label: '✗ Identity mismatch', cls: 'bg-red-50 text-red-700 border-red-200' },
-      'no-face': { label: '⚠ No face detected — ensure camera is visible', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
-      'no-photo': { label: '⚠ Add a profile photo to enable identity verification', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
-      skipped: { label: 'Identity check unavailable', cls: 'bg-gray-50 text-gray-500 border-gray-200' },
+      passed:   { label: '✓ Identity verified', cls: 'bg-green-50 text-green-700 border-green-200' },
+      failed:   { label: '✗ Identity mismatch — ensure your face is visible', cls: 'bg-red-50 text-red-700 border-red-200' },
+      'no-face':  { label: '⚠ No face detected — check your camera', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+      'no-photo': { label: '⚠ Add a profile photo on your dashboard to enable identity checks', cls: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+      skipped:  { label: 'Identity check unavailable', cls: 'bg-gray-50 text-gray-500 border-gray-200' },
     }
     const cfg = configs[faceStatus]
     if (!cfg) return null
-    return (
-      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium ${cfg.cls}`}>
-        {cfg.label}
-      </div>
-    )
+    return <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-medium ${cfg.cls}`}>{cfg.label}</div>
   }
 
   return (
@@ -446,7 +437,6 @@ export default function ReadingTestPage() {
 
         {(status === 'ready' || status === 'recording' || status === 'reviewing' || status === 'scored') && current && (
           <>
-            {/* Sentence to read */}
             <div className={`border-2 rounded-xl p-6 mb-5 text-center transition-colors
               ${status === 'scored' && currentScore !== null
                 ? currentScore >= PASSING_SCORE ? 'bg-green-50 border-green-300' : 'bg-red-50 border-red-300'
@@ -456,7 +446,6 @@ export default function ReadingTestPage() {
               <p className="text-lg font-medium text-gray-900 leading-relaxed">{current.text}</p>
             </div>
 
-            {/* Transcription display */}
             {(status === 'recording' || status === 'reviewing' || status === 'scored') && (
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 min-h-[70px]">
                 <p className="text-xs font-semibold text-blue-500 uppercase tracking-wide mb-2">Your transcription:</p>
@@ -470,7 +459,6 @@ export default function ReadingTestPage() {
               </div>
             )}
 
-            {/* Immediate score + face verification result */}
             {status === 'scored' && currentScore !== null && (
               <div className="mb-5 space-y-2">
                 <div className={`rounded-xl px-5 py-4 flex items-center gap-4
@@ -494,40 +482,20 @@ export default function ReadingTestPage() {
               </div>
             )}
 
-            {/* Recording area with webcam preview */}
             {status === 'recording' && (
-              <div className="flex items-center justify-between mb-5">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
-                  <span className="text-sm text-red-600 font-medium">Recording — speak clearly</span>
-                </div>
-                {/* Webcam preview */}
-                <div className="relative w-24 h-18 rounded-lg overflow-hidden bg-gray-900 border border-gray-300 flex-shrink-0">
-                  <video
-                    ref={webcamVideoRef}
-                    className="w-24 h-18 object-cover scale-x-[-1]"
-                    autoPlay
-                    playsInline
-                    muted
-                  />
-                  <div className="absolute bottom-1 left-1 flex items-center gap-1">
-                    <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                  </div>
-                </div>
+              <div className="flex items-center gap-2 mb-5">
+                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+                <span className="text-sm text-red-600 font-medium">Recording — speak clearly</span>
               </div>
             )}
 
             {status === 'ready' && (
               <div className="text-sm text-gray-500 mb-5 space-y-1">
                 <p>Click <strong>Start Recording</strong>, read the sentence aloud, then click <strong>Stop</strong>.</p>
-                <p className="text-xs text-gray-400">Your camera will be used for identity verification while you read.</p>
+                <p className="text-xs text-gray-400">Your camera will briefly activate for identity verification when you stop.</p>
               </div>
             )}
 
-            {/* Hidden canvas for webcam capture */}
-            <canvas ref={webcamCanvasRef} className="hidden" />
-
-            {/* Buttons */}
             <div className="flex flex-col sm:flex-row gap-3">
               {status === 'ready' && speechSupported && (
                 <button onClick={startRecording} className="flex-1 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-lg py-2.5 text-sm transition-colors">
@@ -603,7 +571,6 @@ export default function ReadingTestPage() {
         )}
       </div>
 
-      {/* Completed sentences with per-sentence scores */}
       {currentIdx > 0 && status !== 'passed' && status !== 'failed' && (
         <div className="mt-6">
           <p className="text-sm font-semibold text-gray-700 mb-3">Completed sentences:</p>
